@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+message Elements {repeated Element elements = 40800;}
+
+message Element {
+  uint64 id = 45001;
+  uint32 type = 45002;
+  // 1：文本段，2：图片段，3：文件消息，4:语音消息，5：视频，6：表情段，7：引用段，
+  // 8：提示消息（中间灰色），9：红包，10：应用消息
+  // 21：通话段
+  // 26：动态消息
+
+
+  // 文本
+  string text = 45101;
+
+
+  // 图片
+  // 可引用fileName
+  // 可引用fileSize
+  bytes md5HexStr = 45406; // 小写
+  uint64 original = 45418; // 0 false, 1 true
+  string originImageMd5 = 45424;
+
+  string imageUrlLow = 45802;
+  string imageUrlHigh = 45803;
+  string imageUrlOrigin = 45804;
+
+  string imageFilePath = 45812;
+
+  string imageText = 45815;
+
+
+  // 文件
+  string fileName = 45402;
+  uint64 fileSize = 45405;
+
+  uint64 fileTimestamp = 45505; // ?
+
+
+  // 语音消息
+  // 可引用 fileName
+  // 可引用 fileSize
+  string voiceText =45923;
+  uint64 voiceLen = 45906; //单位为秒
+
+  // 视频
+  // 可引用 fileName
+  // 可引用 fileSize
+  string videoPath = 46403;
+  uint64 videoLen = 45410; //单位为秒
+  uint64 videoWidth = 45411;
+  uint64 videoHeight = 45412;
+  uint64 videoWidth2 = 46413;
+  uint64 videoHeight2 = 46414;
+
+  // 表情消息
+  // 1: QQ 系统表情，2: emoji 表情
+  // https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html
+  uint32 emojiId = 47601;
+  string emojiText = 47602;
+
+
+  // 引用
+  string senderUid = 40020;
+  string interlocutorUid = 40021;
+
+  uint32 senderNum = 47403;
+  uint32 quotedTimestamp = 47404;
+  uint32 interlocutorNum = 47411;
+
+  Element quotedElement = 47423;
+
+
+  // 提示消息
+  string noticeInfo = 48214;
+  string noticeInfo2 = 48271; // ?
+
+
+  // 红包
+  RedPacket redPacket = 48403;
+
+
+  // 应用消息
+  string applicationMessage = 47901;
+
+
+  // 通话消息
+  string callStatus = 48153;
+  string callText = 48157;
+
+  // 动态消息
+  FeedMessage feedTitle = 48175;
+  FeedMessage feedContent = 48176;
+
+  string feedUrl = 48180;
+  string feedLogoUrl = 48181;
+  uint32 feedPublisherNum = 48182;
+
+  string feedJumpInfo = 48183;
+  string feedPublisherUid = 48188;
+}
+
+message FeedMessage {string text = 48178;}
+
+message RedPacket {
+  string greeting = 48443;
+  string prompt = 48444;
+  string redPacketType = 48445;
+  string summary = 48448;
+}

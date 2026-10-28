@@ -1,0 +1,14 @@
+db_path = ".\\databases\\" # 解密后的数据库目录路径
+pic_path = ".\\chatpic\\" # 导出图片的目标目录
+pic_source_path = ".\\nt_data\\Pic\\" # QQ 图片缓存目录
+voice_path = ".\\chatvoice\\" # 导出语音的目标目录
+voice_source_paths = [".\\nt_data\\Ptt\\", ".\\Audio\\"] # QQ 新旧语音缓存目录
+
+output_path = "" # 导出的路径，留空默认为数据库上级目录
+
+c2c_filters = [123456,654321] # 需要输出的私聊消息的QQ号列表，留空导出全部
+export_c2c = true # 设为 false 时不导出私聊
+group_filters = [654321,123456] # 需要输出的群聊消息的群号列表，留空导出全部
+export_group = true # 设为 false 时不导出群聊
+
+output_format = ["txt", "json"] # 需要导出的文件格式
