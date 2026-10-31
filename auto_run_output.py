@@ -23,7 +23,6 @@ import threading
 import time
 from pathlib import Path
 import shutil
-import os
 import logging
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from tqdm import tqdm
@@ -70,12 +69,32 @@ def is_process_running(pid):
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
-def decrypt_database(source_path, output_path, key, progress):
-    temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+def is_plain_database(path):
     try:
-        with source_path.open('rb') as source, temp_path.open('wb') as output:
-            source.seek(1024)
-            page_number = 1
+        with path.open('rb') as database:
+            return database.read(16) == b'SQLite format 3\x00'
+    except OSError:
+        return False
+
+
+def decrypt_database(source_path, output_path, key, progress, resume=False):
+    temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+    page_count = max(0, (source_path.stat().st_size - 1024) // 4096)
+    completed_pages = 0
+    if resume and temp_path.exists():
+        temp_size = temp_path.stat().st_size
+        completed_pages = min(temp_size // 4096, page_count)
+        if completed_pages and not is_plain_database(temp_path):
+            completed_pages = 0
+
+    try:
+        mode = 'r+b' if resume and temp_path.exists() else 'w+b'
+        with source_path.open('rb') as source, temp_path.open(mode) as output:
+            output.truncate(completed_pages * 4096)
+            output.seek(completed_pages * 4096)
+            source.seek(1024 + completed_pages * 4096)
+            progress.update(completed_pages * 4096)
+            page_number = completed_pages + 1
             while page := source.read(4096):
                 if len(page) < 4096:
                     break
@@ -105,10 +124,29 @@ def decrypt_database(source_path, output_path, key, progress):
         return False
 
 
-def decrypt_databases(key_map_path, source_db_dir, dump_output_dir):
+def required_database_names(export_c2c, export_group):
+    required = {'nt_msg.db'}
+    if export_c2c:
+        required.add('profile_info.db')
+    if export_group:
+        required.add('group_info.db')
+    return required
+
+
+def decrypt_databases(
+    key_map_path,
+    source_db_dir,
+    dump_output_dir,
+    export_c2c=True,
+    export_group=True,
+    resume=False,
+):
     key_map = json.loads(key_map_path.read_text(encoding='utf-8')).get('key_map', {})
+    required_names = required_database_names(export_c2c, export_group)
     jobs = []
     for source_path in source_db_dir.rglob('*.db'):
+        if source_path.name not in required_names:
+            continue
         try:
             with source_path.open('rb') as source:
                 source.seek(1024)
@@ -132,7 +170,10 @@ def decrypt_databases(key_map_path, source_db_dir, dump_output_dir):
         for source_path, key, page_bytes in jobs:
             output_path = dump_output_dir / source_path.name
             position_before = progress.n
-            if decrypt_database(source_path, output_path, key, progress):
+            if resume and is_plain_database(output_path):
+                progress.update(page_bytes)
+                succeeded += 1
+            elif decrypt_database(source_path, output_path, key, progress, resume):
                 succeeded += 1
             missing_bytes = page_bytes - (progress.n - position_before)
             if missing_bytes > 0:
@@ -140,7 +181,17 @@ def decrypt_databases(key_map_path, source_db_dir, dump_output_dir):
     return succeeded, len(jobs)
 
 
-def run_qq_dump(cmd, pid, cwd, dump_output_dir, source_db_dir, on_confirmed):
+def run_qq_dump(
+    cmd,
+    pid,
+    cwd,
+    dump_output_dir,
+    source_db_dir,
+    on_confirmed,
+    export_c2c=True,
+    export_group=True,
+    resume=False,
+):
     output_lines = []
     process = subprocess.Popen(
         cmd,
@@ -178,9 +229,16 @@ def run_qq_dump(cmd, pid, cwd, dump_output_dir, source_db_dir, on_confirmed):
     key_map_path = dump_output_dir / 'key_map.json'
     if close_prompt_shown and key_map_path.exists():
         time.sleep(1)
-        succeeded, total = decrypt_databases(key_map_path, source_db_dir, dump_output_dir)
+        succeeded, total = decrypt_databases(
+            key_map_path,
+            source_db_dir,
+            dump_output_dir,
+            export_c2c,
+            export_group,
+            resume,
+        )
         logging.info('Python 流式解密完成: %d/%d 个数据库', succeeded, total)
-        returncode = 0 if (dump_output_dir / 'nt_msg.db').exists() else 1
+        returncode = 0 if is_plain_database(dump_output_dir / 'nt_msg.db') else 1
     return returncode, ''.join(output_lines)
 
 
@@ -232,6 +290,13 @@ def main():
     parser.add_argument('-lock_db_dir', required=True, help='原始数据库路径（支持 E:\\path 或 E:/path，qq_dump_db 的 --db-dir）')
     parser.add_argument('-output_dir', required=True, help='导出路径（写入 config.toml 的 output_path）')
     parser.add_argument('-keeptemp', action='store_true', help='保留解密临时目录和自动生成的 config.toml')
+    parser.add_argument(
+        '-continue',
+        '--continue',
+        dest='continue_run',
+        action='store_true',
+        help='从上次中断处继续，复用已解密数据库并从临时分页文件恢复',
+    )
     c2c_group = parser.add_mutually_exclusive_group()
     c2c_group.add_argument('-c2c', nargs='?', const='[]', default=None,
                            help='私聊过滤器，示例: -c2c "[123456,654321]" 或 -c2c 123456,654321；不传或传空表示全部')
@@ -282,12 +347,8 @@ def main():
         logging.error('找不到 qq_dump_db 可执行文件: %s', qq_dump_exe)
         raise SystemExit(2)
 
-    qq_main_pids = find_qq_main_pids()
-    if not qq_main_pids:
-        print('Please run QQ.', file=sys.stderr)
-        raise SystemExit(1)
-
     dump_output_dir = repo_root / 'output' / qq
+    key_map_path = dump_output_dir / 'key_map.json'
     possible_dump_dirs = [
         repo_root / 'qq_dump_db' / 'output' / qq,
         dump_output_dir,
@@ -295,6 +356,31 @@ def main():
     ]
     logging.info('解密数据库输出目录: %s', ', '.join(map(str, possible_dump_dirs)))
     nt_files = []
+    required_names = required_database_names(export_c2c, export_group)
+    if args.continue_run:
+        if key_map_path.exists() and key_map_has_nt_msg(key_map_path, lock_db_dir):
+            succeeded, total = decrypt_databases(
+                key_map_path,
+                lock_db_dir,
+                dump_output_dir,
+                export_c2c,
+                export_group,
+                resume=True,
+            )
+            logging.info('续跑解密完成: %d/%d 个数据库', succeeded, total)
+        cached_databases_ready = all(
+            is_plain_database(dump_output_dir / name)
+            for name in required_names
+        )
+        if cached_databases_ready:
+            nt_files = find_nt_msg_files(dump_output_dir)
+            logging.info('已找到可续用的解密数据库，无需重新提取密钥')
+
+    qq_main_pids = [] if nt_files else find_qq_main_pids()
+    if not nt_files and not qq_main_pids:
+        print('Please run QQ or use -continue with complete cached databases.', file=sys.stderr)
+        raise SystemExit(1)
+
     with tqdm(
         total=len(qq_main_pids),
         desc='自动确认 QQ 主进程',
@@ -302,7 +388,7 @@ def main():
         leave=False,
     ) as pid_progress:
         for pid in qq_main_pids:
-            if dump_output_dir.exists():
+            if dump_output_dir.exists() and not args.continue_run:
                 shutil.rmtree(dump_output_dir)
 
             cmd = [
@@ -319,19 +405,23 @@ def main():
                 pid_progress.refresh()
                 pid_progress.close()
 
-            returncode, qq_dump_output = run_qq_dump(
+            _, qq_dump_output = run_qq_dump(
                 cmd,
                 pid,
                 repo_root,
                 dump_output_dir,
                 lock_db_dir,
                 mark_pid_confirmed,
+                export_c2c,
+                export_group,
+                args.continue_run,
             )
             if not pid_confirmed:
                 pid_progress.update(1)
             nt_files = [
                 path for path in find_nt_msg_files(dump_output_dir)
-                if path.stat().st_mtime >= dump_started_at - 1
+                if is_plain_database(path)
+                and (args.continue_run or path.stat().st_mtime >= dump_started_at - 1)
             ]
             if nt_files:
                 print(database_log(qq_dump_output), flush=True)
@@ -351,6 +441,8 @@ def main():
         repair_cmd = [sys.executable, str(repo_root / 'copy_tables_from_corrupt.py'), str(nt)]
         if not export_c2c:
             repair_cmd.append('--skip-c2c')
+        if not export_group:
+            repair_cmd.append('--skip-group')
         if export_group and group_filters_arg:
             repair_cmd.extend(['--groups', ','.join(map(str, group_filters_arg))])
         try:
