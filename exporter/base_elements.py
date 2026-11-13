@@ -14,8 +14,11 @@ pic_path = ""
 pic_source_path = ""
 voice_path = ""
 voice_source_paths = ()
+export_media = True
+MEDIA_ELEMENT_TYPES = {2, 3, 4, 5, 6}
 
 __all__ = [
+    "should_export_element",
     "BaseText",
     "BaseImage",
     "BaseFile",
@@ -28,6 +31,10 @@ __all__ = [
     "BaseCall",
     "BaseFeed",
 ]
+
+
+def should_export_element(element_type):
+    return export_media or element_type not in MEDIA_ELEMENT_TYPES
 
 
 def readable_file_size(file_size):

@@ -4,8 +4,9 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 
+from exporter.base_elements import should_export_element
 from .elements import *
-from ..__init__ import sanitize_filename
+from ..__init__ import conversation_filename
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -13,13 +14,14 @@ env = Environment(loader=FileSystemLoader('.'))
 template = env.get_template('template/template.html')
 
 class HtmlExportManager:
-    def __init__(self,dbman,queries, output_path, task_type):
+    def __init__(self,dbman,queries, output_path, task_type, with_id=False):
 
         self.export_queue: dict[Path:list] = defaultdict(list)
         self.dbman = dbman
         self.queries = queries
         self.output_path = output_path
         self.task_type = task_type
+        self.with_id = with_id
         register(self.save)
 
     def process(self):
@@ -27,20 +29,42 @@ class HtmlExportManager:
         for interlocutor_uid,query in self.queries.items():
             if self.task_type == "c2c":
                 profile_info = self.dbman.profile_info(interlocutor_uid)
+                nickname = profile_info.nickname if profile_info else None
+                remark = profile_info.remark if profile_info else None
                 if profile_info:
                     filename = profile_info.remark or profile_info.nickname
                 elif query.first().mapping:
                     filename = query.first().mapping.qq_num
                 else:
                     filename = query.first().interlocutor_num
+                identifier = (
+                    getattr(profile_info, 'qq_num', None)
+                    if profile_info else None
+                ) or (
+                    query.first().mapping.qq_num
+                    if query.first().mapping else query.first().interlocutor_num
+                )
             else:
                 group_info = self.dbman.group_info(query.first().mixed_group_num)
+                nickname = group_info.name if group_info else None
+                remark = group_info.remark if group_info else None
                 if group_info:
                     filename = group_info.remark or group_info.name
                 else:
                     filename = query.first().mixed_group_num
+                identifier = (
+                    getattr(group_info, 'group_number', None)
+                    if group_info else None
+                ) or query.first().mixed_group_num
 
-            html_path = self.output_path / f"{sanitize_filename(filename)}.html"
+            filename = conversation_filename(
+                filename,
+                self.with_id,
+                identifier,
+                nickname,
+                remark,
+            )
+            html_path = self.output_path / f"{filename}.html"
             for message in tqdm(query.all()):
                 exporter = Exporter(message)
                 self.export_queue[html_path].append(exporter.content_dict)
@@ -73,10 +97,14 @@ class BaseExporter:
 
     def _extract(self):
         for element in self.message.elements.elements:
+            if not should_export_element(element.type):
+                continue
             self.contents.append(self._extract_single(element))
 
     def _extract_single(self, element):
         if element.type in self.elements_map:
+            if not should_export_element(element.type):
+                return None
             return self.elements_map[element.type](element).content
         elif element.type == 7:
             result = self._extract_single(element.quotedElement)

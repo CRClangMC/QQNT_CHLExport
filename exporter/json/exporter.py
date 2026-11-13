@@ -3,18 +3,20 @@ from pathlib import Path
 from json import dump
 from tqdm import tqdm
 
+from exporter.base_elements import should_export_element
 from exporter.txt.elements import *
-from ..__init__ import sanitize_filename
+from ..__init__ import conversation_filename
 
 __all__ = ["JsonExportManager"]
 
 
 class JsonExportManager:
-    def __init__(self, dbman, queries, output_path, task_type):
+    def __init__(self, dbman, queries, output_path, task_type, with_id=False):
         self.dbman = dbman
         self.queries = queries
         self.output_path = output_path
         self.task_type = task_type
+        self.with_id = with_id
 
     def process(self):
         Exporter = C2cJsonExporter if self.task_type == "c2c" else GroupJsonExporter
@@ -22,6 +24,8 @@ class JsonExportManager:
         for task_index, (interlocutor_uid, query) in enumerate(self.queries.items(), 1):
             if self.task_type == "c2c":
                 profile_info = self.dbman.profile_info(interlocutor_uid)
+                nickname = profile_info.nickname if profile_info else None
+                remark = profile_info.remark if profile_info else None
                 if profile_info:
                     filename = (
                         profile_info.remark
@@ -35,8 +39,17 @@ class JsonExportManager:
                     filename = query.first().mapping.qq_num
                 else:
                     filename = query.first().interlocutor_num
+                identifier = (
+                    getattr(profile_info, 'qq_num', None)
+                    if profile_info else None
+                ) or (
+                    query.first().mapping.qq_num
+                    if query.first().mapping else query.first().interlocutor_num
+                )
             else:
                 group_info = self.dbman.group_info(query.first().mixed_group_num)
+                nickname = group_info.name if group_info else None
+                remark = group_info.remark if group_info else None
                 if group_info:
                     filename = (
                         group_info.remark
@@ -47,8 +60,19 @@ class JsonExportManager:
                         filename = query.first().mixed_group_num
                 else:
                     filename = query.first().mixed_group_num
+                identifier = (
+                    getattr(group_info, 'group_number', None)
+                    if group_info else None
+                ) or query.first().mixed_group_num
 
-            json_path = self.output_path / f"{sanitize_filename(filename)}.json"
+            filename = conversation_filename(
+                filename,
+                self.with_id,
+                identifier,
+                nickname,
+                remark,
+            )
+            json_path = self.output_path / f"{filename}.json"
             temp_path = json_path.with_suffix(".json.tmp")
             with temp_path.open(mode="w", encoding="utf-8") as file:
                 file.write("[")
@@ -88,10 +112,14 @@ class BaseExporter:
 
     def _extract(self):
         for element in self.message.elements.elements:
+            if not should_export_element(element.type):
+                continue
             self.contents.append(self._extract_single(element))
 
     def _extract_single(self, element):
         if element.type in self.elements_map:
+            if not should_export_element(element.type):
+                return None, None
             return self.elements_map[element.type](element).content
         elif element.type == 7:
             result = self._extract_single(element.quotedElement)

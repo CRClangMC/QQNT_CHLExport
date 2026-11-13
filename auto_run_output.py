@@ -290,6 +290,8 @@ def main():
     parser.add_argument('-lock_db_dir', required=True, help='原始数据库路径（支持 E:\\path 或 E:/path，qq_dump_db 的 --db-dir）')
     parser.add_argument('-output_dir', required=True, help='导出路径（写入 config.toml 的 output_path）')
     parser.add_argument('-keeptemp', action='store_true', help='保留解密临时目录和自动生成的 config.toml')
+    parser.add_argument('-withid', action='store_true', help='在聊天记录文件名中添加 QQ 号/群号')
+    parser.add_argument('-nomedia', action='store_true', help='不导出图片、文件、语音、视频和表情信息，也不创建媒体目录')
     parser.add_argument(
         '-continue',
         '--continue',
@@ -467,10 +469,11 @@ def main():
         logging.info('替换完成')
 
     # 5. 生成 config.toml
-    # 确保输出路径和 pic_path 存在
+    # 确保输出路径存在
     output_dir.mkdir(parents=True, exist_ok=True)
     pic_path = output_dir / 'chatpic'
-    pic_path.mkdir(parents=True, exist_ok=True)
+    if not args.nomedia:
+        pic_path.mkdir(parents=True, exist_ok=True)
     pic_source_path = lock_db_dir.parent / 'nt_data' / 'Pic'
     voice_path = output_dir / 'chatvoice'
     voice_source_paths = [
@@ -494,6 +497,8 @@ def main():
     toml_lines.append('')
     toml_lines.append('# 导出路径')
     toml_lines.append(f'output_path = "{escape_toml_path(output_dir)}"')
+    toml_lines.append(f'with_id = {str(args.withid).lower()}')
+    toml_lines.append(f'export_media = {str(not args.nomedia).lower()}')
     toml_lines.append('')
     # c2c/group filters
     toml_lines.append('# c2c_filters: 为空数组表示导出全部私聊；可填写 QQ 列表')

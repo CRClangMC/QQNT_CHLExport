@@ -35,9 +35,9 @@ def mk_output_path(path, export_c2c=True, export_group=True):
     return c2c_path, group_path
 
 
-def run_single(task_type, queries, Exporter, path, dbman):
+def run_single(task_type, queries, Exporter, path, dbman, with_id=False):
     logging.info(f"开始解析并写入{task_type}消息")
-    Exporter(dbman,queries, path, task_type).process()
+    Exporter(dbman,queries, path, task_type, with_id).process()
 
     logging.info(f"成功解析并写入{task_type}消息")
 
@@ -48,6 +48,7 @@ def main():
         config = tomllib.load(f)
 
     db_path = Path(config["db_path"])
+    base_elements.export_media = config.get("export_media", True)
 
     pic_path = Path(config["pic_path"])
     base_elements.pic_path = pic_path
@@ -65,6 +66,7 @@ def main():
 
     export_c2c = config.get("export_c2c", True)
     export_group = config.get("export_group", True)
+    with_id = config.get("with_id", False)
     c2c_path, group_path = mk_output_path(output_path, export_c2c, export_group)
 
     c2c_filters = config["c2c_filters"]
@@ -80,9 +82,9 @@ def main():
         group_exporter = exporter_map[output_type]
 
         if export_c2c:
-            run_single("c2c", c2c_queries, c2c_exporter, c2c_path, dbman)
+            run_single("c2c", c2c_queries, c2c_exporter, c2c_path, dbman, with_id)
         if export_group:
-            run_single("group", group_queries, group_exporter, group_path, dbman)
+            run_single("group", group_queries, group_exporter, group_path, dbman, with_id)
 
         logging.info(f"成功导出{output_type}格式")
 

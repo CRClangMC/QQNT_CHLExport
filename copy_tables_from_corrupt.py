@@ -209,11 +209,17 @@ if __name__ == '__main__':
     parser.add_argument('source_db_path')
     parser.add_argument('new_db_path', nargs='?')
     parser.add_argument('--skip-c2c', action='store_true')
+    parser.add_argument('--skip-group', action='store_true')
     parser.add_argument('--groups', help='仅恢复指定群号，逗号分隔')
     args = parser.parse_args()
 
     src = Path(args.source_db_path)
     dest = Path(args.new_db_path) if args.new_db_path else src.with_name(src.stem + "_copied.db")
-    tables = [table for table in KEY_TABLES if not args.skip_c2c or table != 'c2c_msg_table']
+    skipped_tables = set()
+    if args.skip_c2c:
+        skipped_tables.update(('c2c_msg_table', 'nt_uid_mapping_table'))
+    if args.skip_group:
+        skipped_tables.add('group_msg_table')
+    tables = [table for table in KEY_TABLES if table not in skipped_tables]
     group_filters = args.groups.split(',') if args.groups else None
     copy_tables(src, dest, tables, group_filters)
