@@ -17,10 +17,13 @@ import ast
 import csv
 import ctypes
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import shutil
 import logging
@@ -28,6 +31,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+QQ_DUMP_KEY_TIMEOUT_SECONDS = 30
 
 
 def escape_toml_path(p: Path) -> str:
@@ -41,20 +46,96 @@ def run_cmd(cmd, cwd=None, check=True):
     return subprocess.run(cmd, cwd=cwd, check=check)
 
 
+@contextmanager
+def qq_dump_compatible_db_dir(source_db_dir, workspace_dir):
+    source_db_dir = source_db_dir.resolve()
+    if str(source_db_dir).isascii():
+        yield source_db_dir
+        return
+
+    temp_dir = None
+    temp_roots = [workspace_dir, Path(tempfile.gettempdir())]
+    system_root = os.environ.get('SystemRoot')
+    if system_root:
+        temp_roots.append(Path(system_root) / 'Temp')
+
+    for temp_root in temp_roots:
+        if not temp_root.is_dir() or not str(temp_root.resolve()).isascii():
+            continue
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix='_qqdb_', dir=temp_root))
+            break
+        except OSError:
+            continue
+
+    if temp_dir is None:
+        raise RuntimeError('无法创建 ASCII 临时目录，不能为 qq_dump_db.exe 生成中文数据库路径的兼容入口')
+
+    junction = temp_dir / 'source'
+    powershell = shutil.which('powershell.exe')
+    if not powershell and system_root:
+        system_powershell = Path(system_root) / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
+        if system_powershell.is_file():
+            powershell = str(system_powershell)
+    if not powershell:
+        temp_dir.rmdir()
+        raise RuntimeError('找不到 Windows PowerShell，无法为 qq_dump_db.exe 创建中文路径兼容入口')
+
+    escaped_junction = str(junction).replace("'", "''")
+    escaped_source = str(source_db_dir).replace("'", "''")
+    command = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"New-Item -ItemType Junction -Path '{escaped_junction}' "
+        f"-Target '{escaped_source}' | Out-Null"
+    )
+    try:
+        result = subprocess.run(
+            [powershell, '-NoProfile', '-NonInteractive', '-Command', command],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=False,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f'创建中文数据库路径兼容入口失败: {detail}')
+        if not junction.is_dir():
+            raise RuntimeError(f'PowerShell 未创建数据库路径兼容入口: {junction}')
+        logging.info('数据库路径包含非 ASCII 字符，使用临时 ASCII 联接路径: %s', junction)
+        yield junction
+    finally:
+        if os.path.lexists(junction):
+            junction.rmdir()
+        temp_dir.rmdir()
+
+
 def find_nt_msg_files(output_dir: Path):
     return list(output_dir.rglob('nt_msg.db'))
 
 
-def key_map_has_nt_msg(key_map_path, source_db_dir):
-    source_path = source_db_dir / 'nt_msg.db'
+def key_map_has_required_databases(key_map_path, source_db_dir, required_names):
     try:
-        with source_path.open('rb') as source:
-            source.seek(1024)
-            nt_msg_salt = source.read(16).hex()
         key_map = json.loads(key_map_path.read_text(encoding='utf-8')).get('key_map', {})
-        return nt_msg_salt in key_map
     except (OSError, ValueError):
         return False
+
+    found_names = set()
+    keyed_names = set()
+    for source_path in source_db_dir.rglob('*.db'):
+        if source_path.name not in required_names:
+            continue
+        found_names.add(source_path.name)
+        try:
+            with source_path.open('rb') as source:
+                source.seek(1024)
+                salt = source.read(16).hex()
+        except OSError:
+            continue
+        if salt in key_map:
+            keyed_names.add(source_path.name)
+
+    return 'nt_msg.db' in keyed_names and found_names.issubset(keyed_names)
 
 
 def is_process_running(pid):
@@ -188,6 +269,7 @@ def run_qq_dump(
     dump_output_dir,
     source_db_dir,
     on_confirmed,
+    required_names,
     export_c2c=True,
     export_group=True,
     resume=False,
@@ -196,7 +278,7 @@ def run_qq_dump(
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -211,13 +293,36 @@ def run_qq_dump(
     output_thread = threading.Thread(target=collect_output, daemon=True)
     output_thread.start()
     target_was_running = True
-    close_prompt_shown = False
+    required_keys_found = False
+    last_key_map_signature = None
+    scan_started_at = time.monotonic()
     while process.poll() is None:
         key_map_path = dump_output_dir / 'key_map.json'
-        if not close_prompt_shown and key_map_has_nt_msg(key_map_path, source_db_dir):
-            close_prompt_shown = True
+        try:
+            stat = key_map_path.stat()
+            key_map_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            key_map_signature = None
+        if key_map_signature is not None and key_map_signature != last_key_map_signature:
+            last_key_map_signature = key_map_signature
+            required_keys_found = key_map_has_required_databases(
+                key_map_path,
+                source_db_dir,
+                required_names,
+            )
+        if required_keys_found:
             on_confirmed()
-            tqdm.write('已确认 QQ 主进程，请关闭 QQ。')
+            tqdm.write('已获取所需数据库密钥，停止扫描并开始解密。')
+            process.terminate()
+            break
+        if time.monotonic() - scan_started_at >= QQ_DUMP_KEY_TIMEOUT_SECONDS:
+            logging.warning(
+                '扫描 QQ 进程 PID %d 超过 %d 秒仍未找到所需密钥，停止本次扫描并尝试下一个进程',
+                pid,
+                QQ_DUMP_KEY_TIMEOUT_SECONDS,
+            )
+            process.terminate()
+            break
         if target_was_running and not is_process_running(pid):
             target_was_running = False
             logging.info('目标 QQ 进程 PID %d 已退出，继续解密数据库', pid)
@@ -227,8 +332,13 @@ def run_qq_dump(
     returncode = process.wait()
     output_thread.join()
     key_map_path = dump_output_dir / 'key_map.json'
-    if close_prompt_shown and key_map_path.exists():
-        time.sleep(1)
+    if not required_keys_found:
+        required_keys_found = key_map_has_required_databases(
+            key_map_path,
+            source_db_dir,
+            required_names,
+        )
+    if required_keys_found and key_map_path.exists():
         succeeded, total = decrypt_databases(
             key_map_path,
             source_db_dir,
@@ -360,7 +470,11 @@ def main():
     nt_files = []
     required_names = required_database_names(export_c2c, export_group)
     if args.continue_run:
-        if key_map_path.exists() and key_map_has_nt_msg(key_map_path, lock_db_dir):
+        if key_map_path.exists() and key_map_has_required_databases(
+            key_map_path,
+            lock_db_dir,
+            required_names,
+        ):
             succeeded, total = decrypt_databases(
                 key_map_path,
                 lock_db_dir,
@@ -380,55 +494,61 @@ def main():
 
     qq_main_pids = [] if nt_files else find_qq_main_pids()
     if not nt_files and not qq_main_pids:
-        print('Please run QQ or use -continue with complete cached databases.', file=sys.stderr)
+        print('请运行QQ以进行数据库解密操作或使用-continue参数继续之前未完成的解密工作。', file=sys.stderr)
         raise SystemExit(1)
 
-    with tqdm(
-        total=len(qq_main_pids),
-        desc='自动确认 QQ 主进程',
-        unit='个',
-        leave=False,
-    ) as pid_progress:
-        for pid in qq_main_pids:
-            if dump_output_dir.exists() and not args.continue_run:
-                shutil.rmtree(dump_output_dir)
+    db_dir_context = (
+        qq_dump_compatible_db_dir(lock_db_dir, repo_root)
+        if qq_main_pids else nullcontext(lock_db_dir.resolve())
+    )
+    with db_dir_context as qq_dump_db_dir:
+        with tqdm(
+            total=len(qq_main_pids),
+            desc='自动确认 QQ 主进程并提取数据库密钥',
+            unit='个',
+            leave=False,
+        ) as pid_progress:
+            for pid in qq_main_pids:
+                if dump_output_dir.exists() and not args.continue_run:
+                    shutil.rmtree(dump_output_dir)
 
-            cmd = [
-                str(qq_dump_exe), '--qq', qq, '--pid', str(pid),
-                '--db-dir', str(lock_db_dir),
-            ]
-            dump_started_at = time.time()
-            pid_confirmed = False
+                cmd = [
+                    str(qq_dump_exe), '--qq', qq, '--pid', str(pid),
+                    '--db-dir', str(qq_dump_db_dir),
+                ]
+                dump_started_at = time.time()
+                pid_confirmed = False
 
-            def mark_pid_confirmed():
-                nonlocal pid_confirmed
-                pid_confirmed = True
-                pid_progress.n = pid_progress.total
-                pid_progress.refresh()
-                pid_progress.close()
+                def mark_pid_confirmed():
+                    nonlocal pid_confirmed
+                    pid_confirmed = True
+                    pid_progress.n = pid_progress.total
+                    pid_progress.refresh()
+                    pid_progress.close()
 
-            _, qq_dump_output = run_qq_dump(
-                cmd,
-                pid,
-                repo_root,
-                dump_output_dir,
-                lock_db_dir,
-                mark_pid_confirmed,
-                export_c2c,
-                export_group,
-                args.continue_run,
-            )
-            if not pid_confirmed:
-                pid_progress.update(1)
-            nt_files = [
-                path for path in find_nt_msg_files(dump_output_dir)
-                if is_plain_database(path)
-                and (args.continue_run or path.stat().st_mtime >= dump_started_at - 1)
-            ]
-            if nt_files:
-                print(database_log(qq_dump_output), flush=True)
-                logging.info('已从 QQ 进程 PID %d 提取数据库密钥', pid)
-                break
+                _, qq_dump_output = run_qq_dump(
+                    cmd,
+                    pid,
+                    repo_root,
+                    dump_output_dir,
+                    lock_db_dir,
+                    mark_pid_confirmed,
+                    required_names,
+                    export_c2c,
+                    export_group,
+                    args.continue_run,
+                )
+                if not pid_confirmed:
+                    pid_progress.update(1)
+                nt_files = [
+                    path for path in find_nt_msg_files(dump_output_dir)
+                    if is_plain_database(path)
+                    and (args.continue_run or path.stat().st_mtime >= dump_started_at - 1)
+                ]
+                if nt_files:
+                    print(database_log(qq_dump_output), flush=True)
+                    logging.info('已从 QQ 进程 PID %d 提取数据库密钥', pid)
+                    break
 
     # 2. 只接受本次解密新生成的数据库，禁止复用上次残留产物
     if not nt_files:
