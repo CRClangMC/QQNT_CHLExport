@@ -1,11 +1,10 @@
-from datetime import datetime
 from pathlib import Path
 from json import dump
 from tqdm import tqdm
 
 from exporter.base_elements import should_export_element
 from exporter.txt.elements import *
-from ..__init__ import conversation_filename
+from ..__init__ import conversation_filename, format_message_time
 
 __all__ = ["JsonExportManager"]
 
@@ -93,7 +92,7 @@ class JsonExportManager:
 class BaseExporter:
     def __init__(self, message):
         self.message = message
-        self.readable_time = datetime.fromtimestamp(message.time).strftime("%Y-%m-%d %H:%M:%S")
+        self.readable_time = format_message_time(message.time)
         self.contents = []
         self.elements_map = {
             1: Text,

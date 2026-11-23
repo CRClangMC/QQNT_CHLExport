@@ -1,12 +1,11 @@
 from atexit import register
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 
 from exporter.base_elements import should_export_element
 from .elements import *
-from ..__init__ import conversation_filename
+from ..__init__ import conversation_filename, format_message_time
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -78,7 +77,7 @@ class HtmlExportManager:
 class BaseExporter:
     def __init__(self, message):
         self.message = message
-        self.readable_time = datetime.fromtimestamp(message.time).strftime("%Y-%m-%d %H:%M:%S")
+        self.readable_time = format_message_time(message.time)
         self.contents = []
         self.elements_map = {
             1: Text,

@@ -1,4 +1,6 @@
+from datetime import datetime
 import re
+
 
 def sanitize_filename(filename):
     if filename is None:
@@ -17,3 +19,9 @@ def conversation_filename(filename, with_id=False, identifier=None, nickname=Non
         if identifier is not None:
             filename = f'{filename or "unknown"}-{identifier}'
     return sanitize_filename(filename)
+
+
+def format_message_time(timestamp):
+    if timestamp is None:
+        return "未知时间"
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
